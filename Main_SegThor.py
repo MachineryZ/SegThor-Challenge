@@ -5,73 +5,111 @@ Author: Zhizuo Zhang, Peize Zhao, Xinglong Liu, Ning Huang
 import time
 import argparse
 import matplotlib
-import matplotlib.pyplot as plt
 import torch
+
+import matplotlib.pyplot as plt
 import torch.nn as nn
 import torch.optim as optim
-from torch.autograd import Variable
-from torch.utils.data import DataLoader
+import numpy as np
 import scipy.io as sio
 import torchvision.transforms as tr
+import DataLoader_SegThor
 
-from SegThor_DataLoader import XXX
-from Models import VNet
+from torch.autograd import Variable
+from torch.utils.data import DataLoader
+from Model_SegThor import VNet
 from tqdm import tqdm
-from Loss import DICELossMultiClass
-import numpy as np
+from Loss_SegThor import DICELossMultiClass
+from torchvision import transforms
+
 
 
 parser = argparse.ArgumentParser(description = 'VNet for SegThor Dataset')
-parser.add_argument('--batch-size', type = int, default = 32, metavar = 'N', help = 'input batch size for training (default:64)')
+parser.add_argument('--train-batch-size', type = int, default = 32, metavar = 'N', help = 'input batch size for training (default:64)')
+parser.add_argument('--valid-batch-size', type = int, default = 4, metavar = 'N', help = 'input batch size for validing (default:4)')
 parser.add_argument('--test-batch-size', type = int, default = 32, metavar = 'N', help = 'input batch size for testing (default: 64)')
 parser.add_argument('--lr', type = float, default = 1e-03, metavar = 'LR', help = 'Learning Rate (default: 1e-03')
 parser.add_argument('--momentum', type = float, default = 0.95, metavar = 'float', help = 'The parameter of SGD optimizer (default: 0.95)')
 parser.add_argument('--train', action = 'store_true', default = False, help = 'Argument to train model (default: False)')
+parser.add_argument('--resume', default = '', type = str, metavar = 'PATH', help = 'Path to latest chechpoint (default: none)')
 parser.add_argument('--crop-size', type = int, default = [64, 224, 224], nargs = '*',  help = 'Parameter of the crop-size')
+parser.add_argument('--rotation-angle', type = int, default = [15, 15], nargs = '*', help = 'Parameter of the rotational angle')
 parser.add_argument('--max-epochs', type = int, default = 10, metavar = 'N', help = 'Maximum epochs to train the models (default: 10)')
 parser.add_argument('--cuda', action = 'action_true', default = False, help = 'enables CUDA training (default: False)')
-parser.add_argument('--log-interval', type int, default = 1, metavar = 'N', help = 'batchers to wait before logging training status')
-parser.add_argument('--optimizer', type = str, default = 'SGD', metavar = 'str', help = 'Choose of Optimizer (default: SGD)')
+parser.add_argument('--log-interval', type = int, default = 1, metavar = 'N', help = 'batchers to wait before logging training status')
+parser.add_argument('--optimizer', type = str, default = 'SGD', metavar = 'str', choices = ('SGD', 'Adam', 'RMSprop'), help = 'Choose of Optimizer (default: SGD)')
 parser.add_argument('--beta1', type = float, default = 0.9)
 parser.add_argument('--beta2', type = float, default = 0.9)
-parser.add_argument('--data-folder', type = str, default = '/mnt/lustre/zhangzhizuo/Data/SegThorData/', metavar = 'str', help = 'Folder that holds the .npz file to train or test')
+parser.add_argument('--data-folder', type = str, default = '/mnt/lustre/zhangzhizuo/Data/SegThor', metavar = 'str', help = 'Folder that holds the .npz file to train or test')
+parser.add_argument('--n-gpu', type = int, default = 1, metavar = 'N', help = 'Number of gpu used (default: 1)')
+parser.add_argument('--start-epoch', default = 0, type = int, metavar = 'N', help = 'Manual epoch number (useful on restarts)')
 
-args = parser.parse_arge()
-args.cuda = args.cuda and torch.cuda.is_available()
 
-# Loading Data in the Dataset
-PATH_DATA_FOLDER = args.PATH_DATA_FOLDER
-
-set_train = SegThorDataset(PATH_DATA_FOLDER, train = True, )
-train_loader = DataLoader(set_train, batch_size = args.batch_size, shuffle = Ture, num_workers = 1)
-set_test = SegThorDataset(PATH_DATA_FOLDER)
-test_loader = DataLoader(set_test, batch_size = args.test_batch_size, shuffle = False, num_workers = 1)
-
-print("Training Data Numbers: ", len(train_laoder.dataset))
-print("Test Data Numbers: ", len(test_loader.dataset))
+def weights_init(m):
+	classname = m.__class__.__name__
+	if classname.find('Conv3d') != -1:
+		nn.init.kaiming_normal(m.weight)
+		m.bias.data_zero()
 
 # Loading the Vnet Models:
-print('Building VNet')
-time0 = time.time()
-model = VNet()
-time1 = time.time()
-print('Spent {} time to build the net'.format(time1 - time0))
-print('The net\'s parameters are {} '.format(sum(param.numel() for param in model.parameters())))
+def Build_Net():
+	print('Building VNet')
+	time0 = time.time()
+	model = VNet()
+	model = nn.parallel.DataParallel(model, device_ids = gpu_ids)
+	time1 = time.time()
+	print('Spent {} time to build the net'.format(time1 - time0))
+	print('The net\'s parameters are {} '.format(sum(param.numel() for param in model.parameters())))
 
-if args.cuda:
-	model.cuda()
 
-if args.optimizer == 'SGD':
-	optimizer = optim.SGD(model.parameters(), lr = args.lr, momentum = args.momentum)
+def main():
+	args = parser.parse_args()
+	args.cuda = args.cuda and torch.cuda.is_available()
 
-if args.optimizer == 'ADAM':
-	optimizer = optim.Adam(model.parameters(), lr = args.lr, betas = (args.beta1, args.beta2))
+	# Loading Data in the Dataset
+	SegThorTrainTrans = transforms.Compose([transforms.RandomHorizontalFlip(), transforms.RandomRotation(args.rotation_angle), transforms.RandomCrop(args.crop_size), transforms.ToTensor])
+	SegThorValidTrans = transforms.Compose([transforms.RandomHorizontalFlip(), transforms.RandomRotation(args.rotation_angle), transforms.RandomCrop(args.crop_size), transforms.ToTensor])
+	SegThorTestTrans = transforms.Compose([transforms.RandomSizedCrop(parser.crop_size), transforms.ToTensor])
 
-# Define Loss Function
-criterion = DICELossMultiClass()
+	data_folder = args.data_folder
+	train_set = DataLoader_SegThor(data_folder, phase = 'train', transforms = SegThorTrainTrans)
+	train_loader = DataLoader(train_set, batch_size = args.train_batch_size * args.n_gpu, shuffle = True, num_workers = 1)
+	valid_set = DataLoader_SegThor(data_folder, phase = 'valid', transforms = SegThorValidTrans)
+	valid_loader = DataLoader(valid_set, batch_size = args.valid_batch_size * args.n_gpu, shuffle = False, num_workers = 1)
+	test_set = DataLoader_SegThor(data_folder, phase = 'test', transforms = SegThorTestTrans)
+	test_loader = DataLoader(test_set, batch_size = args.test_batch_size * args.n_gpu, shuffle = False, num_workers = 1)
+	print("Training Data Numbers: ", len(train_laoder.dataset))
+	print("Test Data Numbers: ", len(test_loader.dataset))
+
+	#Build the Net
+	Build_Net()
+	'''
+	if args.resume:
+		if os.path.isfile(args.resume):
+			print("=> Loading chechpoint '{}'".format(args.resume))
+			checkpoint = torch.load(args.resume)
+			args.start_epoch = checkpoint['epoch']
+			best_precision1 = chechpoint['best_precission1']
+			model.load_state_dict(checkpoint['state_dict'])
+			print("=> Already loaded checkpoint '{}'(epoch {})".format(args.evaluate, checkpoint['epoch']))
+		else:
+			print("=> No checkpoint found at '{}'".format(args.resume))
+	else:
+		#model.apply(weights_init)
+		model.apply()
+	'''
+
+	# Define Loss Function
+	criterion = DICELossMultiClass()
+	
+	loss_list = []
+	for epoch in tqdm(range(1, args.max_epochs)):
+		train(epoch, model, optimizer)
+
+
 
 # Training
-def train(epoch, loss_list):
+def train(epoch, model, optimizer, loss_list, criterion):
 	model.train()
 	for batch_idx, (image, mask) in enumerate(train_loader):
 		if args.cuda:
@@ -126,9 +164,9 @@ def test(train_accuracy = False, save_output = False):
 	test_loss /= len(loader)
 	if train_accuracy:
 		print('\nTraining Set: Average DICE Coefficient: {:.4f})\n'.format(test_loss))
-	slse
+	else:
 		print('\nTest Set: Average DICE Coefficient: {:.4f})\n'.format(test_loss))
-
+'''
 if args.train:
 	loss_list = []
 	for i in tqdm(range(args.epochs)):
@@ -146,7 +184,9 @@ elif args.load is not None:
 	model.load_state_dict(torch.load(args.load))
 	test(save_output = True)
 	test(train_accuracy = True)
-
+'''
+if __name__ == '__main__':
+	main()
 
 
 
